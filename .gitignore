@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local datasets and generated outputs
+data/
+cityscapes_small/
+downloads/
+output/
+outputs/
+results/
+metrics/
+predictions/
+
+# Large model/runtime artifacts
+*.onnx
+*.dxnn
+*.pt
+*.pth
+*.pth.tar
+*.engine
+*.trt
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
