@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=2048)
     parser.add_argument("--num-classes", type=int, default=19)
-    parser.add_argument("--opset", type=int, default=17)
+    parser.add_argument("--opset", type=int, default=18)
     return parser.parse_args()
 
 

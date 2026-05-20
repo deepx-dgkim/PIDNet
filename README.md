@@ -110,6 +110,42 @@ python scripts/eval_cityscapes_onnx.py \
   --input-size 1024 2048
 ```
 
+## ONNX Demo
+
+`demo_onnx.py`는 `pidnet_s_cityscapes_val.onnx`를 기본으로 로드하고, 입력으로 단일 이미지 파일, 이미지 폴더, 비디오 파일을 받을 수 있습니다. 추론 결과는 OpenCV `imshow` 창에 실시간으로 표시하며 따로 저장하지 않습니다. 이미지 폴더나 비디오 입력에서는 이전 결과를 지우고 새 프레임의 segmentation 결과만 계속 갱신합니다.
+
+```bash
+# 단일 이미지
+python scripts/demo_onnx.py external/PIDNet/samples/frankfurt_000000_002196_leftImg8bit.png
+
+# 이미지 폴더
+python scripts/demo_onnx.py cityscapes_small/images
+
+# 비디오 파일
+python scripts/demo_onnx.py input_video.mp4
+```
+
+기본 화면은 원본 이미지 위에 Cityscapes segmentation 색상을 overlay합니다. mask만 보거나 원본/overlay를 나란히 보고 싶으면 다음 옵션을 사용할 수 있습니다.
+
+```bash
+python scripts/demo_onnx.py cityscapes_small/images --view mask
+python scripts/demo_onnx.py input_video.mp4 --view side-by-side
+```
+
+다른 ONNX를 사용하려면 `--model`을 지정하세요.
+
+```bash
+python scripts/demo_onnx.py cityscapes_small/images \
+  --model pidnet_s_cityscapes_test.onnx
+```
+
+실행 중 `q` 또는 `Esc`를 누르면 종료됩니다. `imshow`를 사용하므로 GUI 표시가 가능한 환경이 필요합니다. 만약 `opencv-python-headless` 때문에 창 생성에 실패하면 headless 패키지를 제거하고 `opencv-python`을 설치하세요.
+
+```bash
+python -m pip uninstall -y opencv-python-headless
+python -m pip install opencv-python
+```
+
 ## 참고
 
 - PIDNet 공식 README는 Cityscapes 데이터를 `data/cityscapes`에 풀고 `tools/eval.py`로 Cityscapes val 평가를 수행하는 흐름을 안내합니다.
