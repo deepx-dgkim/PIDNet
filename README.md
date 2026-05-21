@@ -21,7 +21,7 @@ python -m pip install onnxruntime-gpu
 
 ## Cityscapes 데이터 준비
 
-이 저장소의 빠른 accuracy check는 `cityscapes_small` 폴더를 사용합니다. `scripts/download_cityspace_small.py`는 Hugging Face의 `Chris1/cityscapes` validation split을 streaming으로 읽어서 500장을 아래 구조로 저장합니다.
+이 저장소의 빠른 accuracy check는 `cityscapes_small` 폴더를 사용합니다. `scripts/download_cityscapes_small.py`는 Hugging Face의 `Chris1/cityscapes` validation split을 streaming으로 읽어서 500장을 아래 구조로 저장합니다.
 
 ```text
 cityscapes_small/
@@ -36,7 +36,7 @@ cityscapes_small/
 처음 한 번만 다음처럼 준비하면 됩니다.
 
 ```bash
-python scripts/download_cityspace_small.py
+python scripts/download_cityscapes_small.py
 ```
 
 스크립트 기본값은 `OUT_DIR = "cityscapes_small"`, `SPLIT = "validation"`, `NUM_SAMPLES = 500`입니다. 다른 개수나 split이 필요하면 스크립트 상단 값을 바꾼 뒤 다시 실행하세요. 저장된 mask는 Cityscapes label ID 형식이므로, 평가 스크립트의 기본값인 `--label-format auto`가 PIDNet의 19-class trainId로 변환합니다.
