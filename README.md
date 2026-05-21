@@ -42,6 +42,38 @@ python scripts/download_cityscapes_small.py
 스크립트 기본값은 `OUT_DIR = "cityscapes_small"`, `SPLIT = "validation"`, `NUM_SAMPLES = 500`입니다. 다른 개수나 split이 필요하면 스크립트 상단 값을 바꾼 뒤 다시 실행하세요. 저장된 mask는 Cityscapes label ID 형식이므로, 평가 스크립트의 기본값인 `--label-format auto`가 PIDNet의 19-class trainId로 변환합니다.
 
 
+## PIDNet-S Cityscapes ONNX Export
+
+공식 PIDNet-S Cityscapes checkpoint가 있으면 다음처럼 ONNX를 다시 만들 수 있습니다. 공식 repo는 `PIDNet_S_Cityscapes_val.pt`, `PIDNet_S_Cityscapes_test.pt`를 Cityscapes PIDNet-S 가중치로 제공합니다.
+
+이 저장소의 export 스크립트는 입력 더미 텐서를 `1x3x1024x2048`로 만들고 `dynamic_axes`를 쓰지 않으므로 ONNX 입력/출력의 batch size가 `1`로 고정됩니다. 다른 해상도로 고정하고 싶으면 `--height`, `--width`만 바꿔서 다시 export하세요.
+
+```bash
+git clone https://github.com/XuJiacong/PIDNet external/PIDNet
+
+# PyTorch와 ONNX export 의존성 설치
+python -m pip install torch onnx
+```
+
+현재 디렉터리에 내려받은 공식 `.pt` 파일이 있다면 그대로 지정해서 export할 수 있습니다. 아래 google drive 에서 다운로드 가능합니다.
+아래 google driver 에서 `PIDNet_S_Cityscapes_val.pt` 와 `PIDNet_S_Cityscapes_test.pt` 를 다운로드 합니다. 
+https://drive.google.com/drive/folders/0BySIOtxxULinfjlGdGFiT3NQVUdLVDBxWnhhTjB4VXNBRkFOa281WHlkektYY2VBcWVZb1k?resourcekey=0-w0JIXUekD-FCW-Rm1Z-HfQ&usp=sharing
+
+```bash
+# val checkpoint -> ONNX
+python scripts/export_pidnet_s_cityscapes_onnx.py \
+  --pidnet-repo external/PIDNet \
+  --checkpoint PIDNet_S_Cityscapes_val.pt \
+  --output pidnet_s_cityscapes_val.onnx
+
+# test checkpoint -> ONNX
+python scripts/export_pidnet_s_cityscapes_onnx.py \
+  --pidnet-repo external/PIDNet \
+  --checkpoint PIDNet_S_Cityscapes_test.pt \
+  --output pidnet_s_cityscapes_test.onnx
+```
+
+
 ## cityscapes_small Accuracy 확인
 
 이미 `cityscapes_small` 폴더에 500장 데이터가 준비되어 있으면 바로 실행할 수 있습니다. 스크립트는 기본적으로 아래 구조를 읽습니다.
@@ -101,15 +133,6 @@ python scripts/eval_cityscapes_onnx.py \
   --label-format trainid
 ```
 
-출력 JSON에는 `mIoU`, `pixel_accuracy`, `mean_accuracy`, 클래스별 IoU, FPS가 포함됩니다. ONNX 입력 크기가 고정되어 있으면 스크립트가 자동으로 읽고, 동적 입력이면 원본 Cityscapes 크기인 `1024x2048`을 그대로 넣습니다. 입력 크기를 직접 맞춰야 하는 경우:
-
-```bash
-python scripts/eval_cityscapes_onnx.py \
-  --model pidnet_s_cityscapes_val.onnx \
-  --dataset-root cityscapes_small \
-  --input-size 1024 2048
-```
-
 ## ONNX Demo
 
 `demo_onnx.py`는 `pidnet_s_cityscapes_val.onnx`를 기본으로 로드하고, 입력으로 단일 이미지 파일, 이미지 폴더, 비디오 파일을 받을 수 있습니다. 추론 결과는 OpenCV `imshow` 창에 실시간으로 표시하며 따로 저장하지 않습니다. 이미지 폴더나 비디오 입력에서는 이전 결과를 지우고 새 프레임의 segmentation 결과만 계속 갱신합니다.
@@ -146,63 +169,3 @@ python -m pip uninstall -y opencv-python-headless
 python -m pip install opencv-python
 ```
 
-## 참고
-
-- PIDNet 공식 README는 Cityscapes 데이터를 `data/cityscapes`에 풀고 `tools/eval.py`로 Cityscapes val 평가를 수행하는 흐름을 안내합니다.
-- Cityscapes 공식 스크립트는 `csDownload`, `csCreateTrainIdLabelImgs`, 평가 도구를 제공합니다.
-- 이 스크립트는 `_gtFine_labelTrainIds.png`가 있으면 그대로 사용하고, 없으면 `_gtFine_labelIds.png`를 PIDNet/Cityscapes 19-class trainId로 변환합니다.
-
-## PIDNet-S Cityscapes ONNX Export
-
-공식 PIDNet-S Cityscapes checkpoint가 있으면 다음처럼 ONNX를 다시 만들 수 있습니다. 공식 repo는 `PIDNet_S_Cityscapes_val.pt`, `PIDNet_S_Cityscapes_test.pt`를 Cityscapes PIDNet-S 가중치로 제공합니다.
-
-이 저장소의 export 스크립트는 입력 더미 텐서를 `1x3x1024x2048`로 만들고 `dynamic_axes`를 쓰지 않으므로 ONNX 입력/출력의 batch size가 `1`로 고정됩니다. 다른 해상도로 고정하고 싶으면 `--height`, `--width`만 바꿔서 다시 export하세요.
-
-```bash
-git clone https://github.com/XuJiacong/PIDNet external/PIDNet
-
-# PyTorch와 ONNX export 의존성 설치
-python -m pip install torch onnx
-```
-
-현재 디렉터리에 내려받은 공식 `.pt` 파일이 있다면 그대로 지정해서 export할 수 있습니다. 아래 google drive 에서 다운로드 가능합니다.
-https://drive.google.com/drive/folders/0BySIOtxxULinfjlGdGFiT3NQVUdLVDBxWnhhTjB4VXNBRkFOa281WHlkektYY2VBcWVZb1k?resourcekey=0-w0JIXUekD-FCW-Rm1Z-HfQ&usp=sharing
-
-```bash
-# val checkpoint -> ONNX
-python scripts/export_pidnet_s_cityscapes_onnx.py \
-  --pidnet-repo external/PIDNet \
-  --checkpoint PIDNet_S_Cityscapes_val.pt \
-  --output pidnet_s_cityscapes_val.onnx
-
-# test checkpoint -> ONNX
-python scripts/export_pidnet_s_cityscapes_onnx.py \
-  --pidnet-repo external/PIDNet \
-  --checkpoint PIDNet_S_Cityscapes_test.pt \
-  --output pidnet_s_cityscapes_test.onnx
-```
-
-ONNX input shape에서 batch가 `1`로 고정됐는지 확인:
-
-```bash
-python - <<'PY'
-import onnx
-
-model = onnx.load("pidnet_s_cityscapes_val.onnx")
-for value in list(model.graph.input) + list(model.graph.output):
-    dims = [
-        dim.dim_value if dim.dim_value else dim.dim_param
-        for dim in value.type.tensor_type.shape.dim
-    ]
-    print(value.name, dims)
-PY
-```
-
-생성된 ONNX를 `cityscapes_small`로 확인:
-
-```bash
-python scripts/eval_cityscapes_onnx.py \
-  --model pidnet_s_cityscapes_val.onnx \
-  --dataset-root cityscapes_small \
-  --save-json metrics/pidnet_s_cityscapes_val_small.json
-```
