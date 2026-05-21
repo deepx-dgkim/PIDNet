@@ -108,12 +108,12 @@ python scripts/eval_cityscapes_onnx.py \
 
 현재 `cityscapes_small` 500장 기준 측정 결과:
 
-| ONNX | mIoU | Pixel Accuracy | Mean Accuracy | 비고 |
-|---|---:|---:|---:|---|
-| `pidnet_s_cityscapes_val.onnx` | 76.56% | 95.33% | 84.43% | 공정한 validation 기준 |
-| `pidnet_s_cityscapes_test.onnx` | 84.84% | 96.78% | 91.54% | 데모/시각화용 권장 |
+| ONNX | mIoU | Pixel Accuracy | Mean Accuracy |
+|---|---:|---:|---:|
+| `pidnet_s_cityscapes_val.onnx` | 76.56% | 95.33% | 84.43% |
+| `pidnet_s_cityscapes_test.onnx` | 84.84% | 96.78% | 91.54% |
 
-`PIDNet_S_Cityscapes_test.pt`는 train+val로 학습된 test 제출용 가중치일 수 있으므로, `cityscapes_small`이 val 이미지 기반이면 수치가 높게 나올 수 있습니다. 따라서 README나 리포트에서 정확도를 말할 때는 `pidnet_s_cityscapes_val.onnx` 결과를 대표값으로 쓰고, 데모 앱은 `pidnet_s_cityscapes_test.onnx`를 쓰는 것을 권장합니다.
+`PIDNet_S_Cityscapes_test.pt`는 train+val로 학습된 test 제출용 가중치일 수 있으므로, `cityscapes_small`이 val 이미지 기반이면 수치가 높게 나올 수 있습니다.
 
 일부만 빠르게 확인:
 
@@ -162,10 +162,87 @@ python scripts/demo_onnx.py cityscapes_small/images \
   --model pidnet_s_cityscapes_test.onnx
 ```
 
-실행 중 `q` 또는 `Esc`를 누르면 종료됩니다. `imshow`를 사용하므로 GUI 표시가 가능한 환경이 필요합니다. 만약 `opencv-python-headless` 때문에 창 생성에 실패하면 headless 패키지를 제거하고 `opencv-python`을 설치하세요.
+실행 중 `q` 또는 `Esc`를 누르면 종료됩니다. `imshow`를 사용하므로 GUI 표시가 가능한 환경이 필요합니다.
+
+## DXNN Accuracy 확인
+
+DXNN 모델은 `dxnn/` 폴더의 `.dxnn` 파일을 사용합니다. 실행 환경에는 DEEPX DXRT Python 패키지의 `dx_engine` 모듈이 설치되어 있어야 합니다.
 
 ```bash
-python -m pip uninstall -y opencv-python-headless
-python -m pip install opencv-python
+python -c "from dx_engine import InferenceEngine; print('dx_engine ok')"
 ```
 
+`cityscapes_small` 데이터가 준비되어 있으면 다음처럼 DXNN accuracy를 확인할 수 있습니다.
+
+```bash
+# val DXNN
+python scripts/eval_cityscapes_dxnn.py \
+  --model dxnn/pidnet_s_cityscapes_val.dxnn \
+  --dataset-root cityscapes_small \
+  --save-json metrics/pidnet_s_cityscapes_val_dxnn_small.json
+
+# test DXNN
+python scripts/eval_cityscapes_dxnn.py \
+  --model dxnn/pidnet_s_cityscapes_test.dxnn \
+  --dataset-root cityscapes_small \
+  --input-color rgb \
+  --save-json metrics/pidnet_s_cityscapes_test_dxnn_small.json
+```
+
+일부 이미지만 빠르게 확인하려면 `--limit`을 추가하세요.
+
+```bash
+python scripts/eval_cityscapes_dxnn.py \
+  --model dxnn/pidnet_s_cityscapes_val.dxnn \
+  --dataset-root cityscapes_small \
+  --limit 20
+```
+
+현재 `cityscapes_small` 500장 기준 DXNN 측정 결과:
+
+| DXNN | mIoU | Pixel Accuracy | Mean Accuracy |
+|---|---:|---:|---:|
+| `pidnet_s_cityscapes_val.dxnn` | 29.53% | 75.54% | 37.84% |
+| `pidnet_s_cityscapes_test.dxnn` | 40.00% | 79.55% | 46.69% |
+| `pidnet_s_cityscapes_val_calib100.dxnn` | 29.53% | 75.65% | 37.82% |
+
+예측 trainId mask를 PNG로 저장하려면 `--save-preds`를 지정합니다.
+
+```bash
+python scripts/eval_cityscapes_dxnn.py \
+  --model dxnn/pidnet_s_cityscapes_val.dxnn \
+  --dataset-root cityscapes_small \
+  --save-preds outputs/dxnn_val_preds
+```
+
+## DXNN Demo
+
+`demo_dxnn.py`는 `dxnn/pidnet_s_cityscapes_val.dxnn`을 기본으로 로드하고, ONNX demo와 동일하게 단일 이미지 파일, 이미지 폴더, 비디오 파일을 입력으로 받을 수 있습니다. 추론 결과는 OpenCV `imshow` 창에 실시간으로 표시합니다.
+
+```bash
+# 단일 이미지
+python scripts/demo_dxnn.py external/PIDNet/samples/frankfurt_000000_002196_leftImg8bit.png
+
+# 이미지 폴더
+python scripts/demo_dxnn.py cityscapes_small/images
+
+# 비디오 파일
+python scripts/demo_dxnn.py input_video.mp4
+```
+
+화면 출력 방식은 `--view`로 바꿀 수 있습니다.
+
+```bash
+python scripts/demo_dxnn.py cityscapes_small/images --view mask
+python scripts/demo_dxnn.py input_video.mp4 --view side-by-side
+```
+
+다른 DXNN 모델을 사용할 때는 `--model`을 지정하세요. `pidnet_s_cityscapes_test.dxnn`은 기존 측정과 동일하게 `--input-color rgb`를 함께 지정합니다.
+
+```bash
+python scripts/demo_dxnn.py cityscapes_small/images \
+  --model dxnn/pidnet_s_cityscapes_test.dxnn \
+  --input-color rgb
+```
+
+실행 중 `q` 또는 `Esc`를 누르면 종료됩니다. `imshow`를 사용하므로 GUI 표시가 가능한 환경이 필요합니다.
