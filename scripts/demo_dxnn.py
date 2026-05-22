@@ -14,7 +14,7 @@ from dx_engine import InferenceEngine
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = REPO_ROOT / "dxnn" / "pidnet_s_cityscapes_val.dxnn"
+DEFAULT_MODEL = REPO_ROOT / "dxnn" / "pidnet_s_cityscapes_val_fixed.dxnn"
 
 IMAGE_EXTENSIONS = {
     ".bmp",
@@ -194,7 +194,7 @@ def preprocess_dxnn(
     height, width = input_size
     resized = cv2.resize(image_bgr, (width, height), interpolation=cv2.INTER_LINEAR)
     if input_color == "rgb":
-        resized = resized[:, :, ::-1]
+        resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
     if np.issubdtype(dtype, np.floating):
         tensor = resized.astype(np.float32) / 255.0

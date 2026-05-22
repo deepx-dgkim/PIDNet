@@ -265,7 +265,7 @@ def preprocess_dxnn(
     height, width = input_size
     resized = cv2.resize(image_bgr, (width, height), interpolation=cv2.INTER_LINEAR)
     if input_color == "rgb":
-        resized = resized[:, :, ::-1]
+        resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
     if np.issubdtype(dtype, np.floating):
         tensor = resized.astype(np.float32) / 255.0

@@ -145,14 +145,14 @@ python scripts/demo_onnx.py external/PIDNet/samples/frankfurt_000000_002196_left
 python scripts/demo_onnx.py cityscapes_small/images
 
 # 비디오 파일
-python scripts/demo_onnx.py input_video.mp4
+python scripts/demo_onnx.py assets/videos/pidnet-test.mp4
 ```
 
 기본 화면은 원본 이미지 위에 Cityscapes segmentation 색상을 overlay합니다. mask만 보거나 원본/overlay를 나란히 보고 싶으면 다음 옵션을 사용할 수 있습니다.
 
 ```bash
 python scripts/demo_onnx.py cityscapes_small/images --view mask
-python scripts/demo_onnx.py input_video.mp4 --view side-by-side
+python scripts/demo_onnx.py assets/videos/pidnet-test.mp4 --view side-by-side
 ```
 
 다른 ONNX를 사용하려면 `--model`을 지정하세요.
@@ -163,6 +163,29 @@ python scripts/demo_onnx.py cityscapes_small/images \
 ```
 
 실행 중 `q` 또는 `Esc`를 누르면 종료됩니다. `imshow`를 사용하므로 GUI 표시가 가능한 환경이 필요합니다.
+
+### ONNX Async Video Demo
+
+비디오 입력에서 preview와 ONNX inference를 분리해 더 높은 처리량을 보고 싶으면 `demo_onnx_async.py`를 사용할 수 있습니다. 기본값은 preview loop를 1ms wait로 돌리고, ONNX Runtime provider에 따라 inference worker 수를 자동 선택합니다.
+
+```bash
+python scripts/demo_onnx_async.py assets/videos/pidnet-test.mp4 
+```
+
+GPU/CPU 환경에 맞춰 worker 수를 직접 조정할 수도 있습니다.
+
+```bash
+python scripts/demo_onnx_async.py assets/videos/pidnet-test.mp4  \
+  --inference-workers 2 \
+  --frame-queue-size 4 \
+  --result-queue-size 4
+```
+
+실시간 스트림처럼 최신 프레임 latency가 더 중요하면 오래된 입력 프레임을 버리도록 설정할 수 있습니다.
+
+```bash
+python scripts/demo_onnx_async.py assets/videos/pidnet-test.mp4 --drop-input-frames
+```
 
 ## DXNN Accuracy 확인
 
@@ -227,14 +250,14 @@ python scripts/demo_dxnn.py external/PIDNet/samples/frankfurt_000000_002196_left
 python scripts/demo_dxnn.py cityscapes_small/images
 
 # 비디오 파일
-python scripts/demo_dxnn.py input_video.mp4
+python scripts/demo_dxnn.py assets/videos/pidnet-test.mp4 
 ```
 
 화면 출력 방식은 `--view`로 바꿀 수 있습니다.
 
 ```bash
 python scripts/demo_dxnn.py cityscapes_small/images --view mask
-python scripts/demo_dxnn.py input_video.mp4 --view side-by-side
+python scripts/demo_dxnn.py assets/videos/pidnet-test.mp4  --view side-by-side
 ```
 
 다른 DXNN 모델을 사용할 때는 `--model`을 지정하세요. `pidnet_s_cityscapes_test.dxnn`은 기존 측정과 동일하게 `--input-color rgb`를 함께 지정합니다.
@@ -246,3 +269,47 @@ python scripts/demo_dxnn.py cityscapes_small/images \
 ```
 
 실행 중 `q` 또는 `Esc`를 누르면 종료됩니다. `imshow`를 사용하므로 GUI 표시가 가능한 환경이 필요합니다.
+
+### DXNN Async Video Demo
+
+비디오 입력에서 NPU를 최대한 계속 바쁘게 유지하려면 `demo_dxnn_async.py`를 사용할 수 있습니다. DXRT `run_async`/`wait` 파이프라인으로 capture, submit/wait, postprocess, preview를 분리하며 기본 NPU 바인딩은 `NPU_ALL`입니다. 테스트 비디오는 `assets/videos/pidnet-test.mp4` 경로에 둡니다.
+
+```bash
+python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4
+```
+
+NPU 처리량 측정처럼 preview 비용을 제외하고 보고 싶으면 `--no-preview`를 사용하세요.
+
+```bash
+python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4 --no-preview
+```
+
+결과를 비디오 파일로 저장하려면 `-s`를 사용하세요. 저장 모드에서는 preview가 자동으로 꺼지고, 모든 결과 프레임을 보존하도록 동작합니다. `-s`만 주면 입력 파일 옆에 `<input>_dxnn_async.mp4`로 저장하고, 경로를 직접 지정할 수도 있습니다.
+
+```bash
+python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4 -s
+python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4 -s outputs/pidnet_async.mp4
+```
+
+프리뷰를 보면서 결과 프레임을 건너뛰지 않으려면 `--preview-all-results`를 사용하세요. 이 모드는 모든 postprocess 결과를 frame 순서대로 표시하므로 drop을 피할 수 있지만, display가 느릴 때 latency가 커지고 NPU 처리량이 낮아질 수 있습니다.
+
+```bash
+python3 scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4 \
+  --max-display-size 0 \
+  --video-delay-ms 1 \
+  --accurate-score-resize \
+  --postprocess-workers 4 \
+  --preview-all-results \
+  --input-color rgb
+```
+
+기본 async depth는 DXRT `buffer_count`를 따릅니다. 장치와 모델 상태에 맞춰 in-flight job 수를 직접 키워볼 수 있습니다.
+
+```bash
+python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4  \
+  --max-inflight 8 \
+  --buffer-count 8 \
+  --postprocess-workers 2
+```
+
+모든 프레임의 postprocess 결과를 보존해야 하면 `--keep-all-results`를 추가하세요. 이 옵션은 CPU postprocess가 느릴 때 NPU 처리량을 낮출 수 있습니다.

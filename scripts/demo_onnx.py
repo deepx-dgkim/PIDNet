@@ -175,7 +175,7 @@ def preprocess(image_bgr: np.ndarray, input_size: tuple[int, int] | None) -> np.
         height, width = input_size
         image_bgr = cv2.resize(image_bgr, (width, height), interpolation=cv2.INTER_LINEAR)
 
-    image_rgb = image_bgr[:, :, ::-1].astype(np.float32) / 255.0
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     image_rgb -= np.array([0.485, 0.456, 0.406], dtype=np.float32)
     image_rgb /= np.array([0.229, 0.224, 0.225], dtype=np.float32)
     return np.expand_dims(image_rgb.transpose(2, 0, 1), axis=0).astype(np.float32)
