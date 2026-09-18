@@ -18,7 +18,8 @@ definition actually requires — `models/__init__.py`, `models/pidnet.py`, and
 `models/model_utils.py`, copied as-is from `models/` in the official repository —
 instead of a full clone. They are pure PyTorch (`torch`, `torch.nn`,
 `torch.nn.functional` only) with no dependency on the rest of that repository
-(training tools, configs, datasets, etc.).
+(training tools, configs, datasets, etc.). That upstream repository is MIT-licensed;
+`models/LICENSE` carries the required copyright notice for these vendored files.
 
 > **Checkpoint sanity check:** the official architecture includes the `pag3`, `pag4`,
 > and `dfm` boundary/detail fusion modules. If you load a checkpoint that is missing
@@ -26,8 +27,7 @@ instead of a full clone. They are pure PyTorch (`torch`, `torch.nn`,
 > PIDNet), PyTorch's `strict=False` loading will silently leave them randomly
 > initialized and the exported model will produce plausible-looking but wrong
 > segmentation. Always confirm `matched == len(model.state_dict())` when loading a new
-> checkpoint before trusting anything exported from it. See `ANALYSIS.md` for a worked
-> example of this exact failure and how it was diagnosed.
+> checkpoint before trusting anything exported from it.
 
 ## Repository layout
 
@@ -37,14 +37,14 @@ PIDNet/
 ├── models/                      # PIDNet-S model definition, vendored from XuJiacong/PIDNet
 │   ├── __init__.py
 │   ├── pidnet.py
-│   └── model_utils.py
+│   ├── model_utils.py
+│   └── LICENSE                  # MIT license covering these three vendored files
 ├── pidnet_demo_onnx.py          # ONNX demo (image / image folder / video)
 ├── pidnet_demo_dxnn.py          # DXNN demo (video, async NPU pipeline)
 ├── download_cityscapes_small.py # Fetches a small Cityscapes validation subset
 ├── eval_cityscapes_onnx.py      # mIoU / pixel accuracy / mean accuracy for an ONNX model
 ├── eval_cityscapes_dxnn.py      # Same, for a compiled DXNN model
-├── compare_onnx_dxnn.py         # ONNX vs. DXNN output consistency (cosine similarity)
-└── ANALYSIS.md                  # Root-cause writeup of a checkpoint/architecture mismatch found during development
+└── compare_onnx_dxnn.py         # ONNX vs. DXNN output consistency (cosine similarity)
 ```
 
 ## 1. Install dependencies
