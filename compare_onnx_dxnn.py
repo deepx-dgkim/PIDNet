@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
         choices=("bgr", "rgb"),
         default="rgb",
         help=(
-            "Color order sent to DXRT. Defaults to rgb, matching modify.py's "
+            "Color order sent to DXRT. Defaults to rgb, matching export_argmax_softmax_onnx.py's "
             "preprocessing -- see the README note on this exact pitfall."
         ),
     )

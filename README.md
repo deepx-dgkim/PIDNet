@@ -12,7 +12,7 @@ The pretrained model comes from the official
 [XuJiacong/PIDNet](https://github.com/XuJiacong/PIDNet) repository — specifically the
 PIDNet-S Cityscapes checkpoint (`PIDNet_S_Cityscapes_val.pt` or
 `PIDNet_S_Cityscapes_test.pt`), distributed from that repository's README via Google
-Drive. `modify.py` needs the PIDNet-S model *definition* (not the full training repo)
+Drive. `export_argmax_softmax_onnx.py` needs the PIDNet-S model *definition* (not the full training repo)
 to load that checkpoint and export it; this project vendors only the three files that
 definition actually requires — `models/__init__.py`, `models/pidnet.py`, and
 `models/model_utils.py`, copied as-is from `models/` in the official repository —
@@ -33,7 +33,7 @@ instead of a full clone. They are pure PyTorch (`torch`, `torch.nn`,
 
 ```text
 PIDNet/
-├── modify.py                    # Export: checkpoint -> ONNX with ArgMax + Softmax baked in
+├── export_argmax_softmax_onnx.py # Export: checkpoint -> ONNX with ArgMax + Softmax baked in
 ├── models/                      # PIDNet-S model definition, vendored from XuJiacong/PIDNet
 │   ├── __init__.py
 │   ├── pidnet.py
@@ -67,7 +67,7 @@ Download `PIDNet_S_Cityscapes_test.pt` from the
 official repository's Google Drive link and place it somewhere in this repo (for
 example at the repo root).
 
-`modify.py` wraps the PIDNet-S backbone with the two output layers this project
+`export_argmax_softmax_onnx.py` wraps the PIDNet-S backbone with the two output layers this project
 needs the NPU to compute, instead of doing them on the host after inference:
 
 ```python
@@ -79,7 +79,7 @@ masks  = F.softmax(logits, dim=1)     # float32 [B, 19, H, W] -> NPU-side Softma
 Export with a fixed **batch size of 1** and a fixed **512×512 input**:
 
 ```bash
-python modify.py \
+python export_argmax_softmax_onnx.py \
   --p PIDNet_S_Cityscapes_test.pt \
   --height 512 --width 512 \
   --batch_size 1 \
@@ -159,7 +159,7 @@ python eval_cityscapes_dxnn.py \
 ```
 
 `--input-color rgb` is required here: `eval_cityscapes_dxnn.py` defaults to
-`bgr`, but every model exported by `modify.py` (and `pidnet_demo_dxnn.py`) expects RGB
+`bgr`, but every model exported by `export_argmax_softmax_onnx.py` (and `pidnet_demo_dxnn.py`) expects RGB
 input, matching PIDNet's original training-time preprocessing. Leaving this at the
 default `bgr` silently feeds the wrong color order and produces a misleadingly low
 score that reflects a preprocessing mismatch, not model quality.
