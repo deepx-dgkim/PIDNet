@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Async PIDNet DXNN video demo for pidnet_argmax_softmax.dxnn.
+"""Async PIDNet DXNN video demo for pretrained_dynamic_handmade.dxnn.
 
 CLI shape matches pidnet_demo_onnx.py so the two demos read the same way;
 this one keeps its async NPU inference pipeline (reader/submitter/waiter/
@@ -23,7 +23,7 @@ from dx_engine import InferenceEngine, InferenceOption
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_MODEL = REPO_ROOT / "pidnet_argmax_softmax.dxnn"
+DEFAULT_MODEL = REPO_ROOT / "pretrained_dynamic_handmade.dxnn"
 
 QUIT_KEYS = {27, ord("q"), ord("Q")}
 STOP = object()
@@ -244,16 +244,16 @@ class PIDNet:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Load pidnet_argmax_softmax.dxnn (PIDNet with ArgMax + Softmax baked "
-            "in as output layers) and run a real-time video demo with an async "
-            "NPU inference pipeline."
+            "Load pretrained_dynamic_handmade.dxnn (PIDNet with ArgMax + Softmax "
+            "baked in as output layers) and run a real-time video demo with an "
+            "async NPU inference pipeline."
         )
     )
     parser.add_argument("input", help="Video file.")
     parser.add_argument(
         "--model",
         default=str(DEFAULT_MODEL),
-        help="DXNN model path. Defaults to pidnet_argmax_softmax.dxnn in this repo.",
+        help="DXNN model path. Defaults to pretrained_dynamic_handmade.dxnn in this repo.",
     )
     parser.add_argument(
         "--output",
