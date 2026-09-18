@@ -1,5 +1,27 @@
 #!/usr/bin/env python3
-"""Run a real-time OpenCV demo with a PIDNet Cityscapes ONNX model."""
+"""PIDNet ONNX demo for pretrained_dynamic.onnx.
+
+Reference implementation: https://github.com/XuJiacong/PIDNet
+(see scripts/PIDNet/tools/custom.py for the original pre/post-processing
+this demo is based on: ImageNet mean/std normalization in RGB order and
+the 19-class Cityscapes color map).
+
+Unlike the upstream repo, pretrained_dynamic.onnx wraps the PIDNet backbone
+with an extra ArgMax + Softmax pair (see scripts/export_vinrobotics.py /
+scripts/PIDNet/extract_vinrobotics.py) so that the class-index and
+per-class-probability post-processing that upstream does on the host after
+`model(x)` is instead baked into the graph as two NPU-friendly output
+layers:
+
+  - "labels": argmax(logits, dim=1)  -> int64 [1, H/8, W/8]
+  - "masks":  softmax(logits, dim=1) -> float32 [1, 19, H/8, W/8]
+
+Both outputs are still at the network's internal stride (1/8th of the
+512x512 input), so this demo only has to resize them back up to the
+original image size before visualizing -- the per-pixel argmax itself is
+no longer something this script needs to compute for the default
+"labels" output.
+"""
 
 from __future__ import annotations
 
@@ -12,86 +34,67 @@ import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_MODEL = REPO_ROOT / "pidnet_s_cityscapes_val.onnx"
+DEFAULT_MODEL = REPO_ROOT / "pretrained_dynamic.onnx"
+NUM_CLASSES = 19
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-IMAGE_EXTENSIONS = {
-    ".bmp",
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".tif",
-    ".tiff",
-    ".webp",
-}
-VIDEO_EXTENSIONS = {
-    ".avi",
-    ".m4v",
-    ".mkv",
-    ".mov",
-    ".mp4",
-    ".mpeg",
-    ".mpg",
-    ".webm",
-}
+IMAGE_EXTENSIONS = {".bmp", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
+VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm"}
 
-CITYSCAPES_COLORS = np.array(
+# Same 19 Cityscapes trainId colors as scripts/PIDNet/tools/custom.py, in BGR
+# order for OpenCV.
+CITYSCAPES_COLORS_BGR = np.array(
     [
         (128, 64, 128),  # road
-        (244, 35, 232),  # sidewalk
+        (232, 35, 244),  # sidewalk
         (70, 70, 70),  # building
-        (102, 102, 156),  # wall
-        (190, 153, 153),  # fence
+        (156, 102, 102),  # wall
+        (153, 153, 190),  # fence
         (153, 153, 153),  # pole
-        (250, 170, 30),  # traffic light
-        (220, 220, 0),  # traffic sign
-        (107, 142, 35),  # vegetation
+        (30, 170, 250),  # traffic light
+        (0, 220, 220),  # traffic sign
+        (35, 142, 107),  # vegetation
         (152, 251, 152),  # terrain
-        (70, 130, 180),  # sky
-        (220, 20, 60),  # person
-        (255, 0, 0),  # rider
-        (0, 0, 142),  # car
-        (0, 0, 70),  # truck
-        (0, 60, 100),  # bus
-        (0, 80, 100),  # train
-        (0, 0, 230),  # motorcycle
-        (119, 11, 32),  # bicycle
+        (180, 130, 70),  # sky
+        (60, 20, 220),  # person
+        (0, 0, 255),  # rider
+        (142, 0, 0),  # car
+        (70, 0, 0),  # truck
+        (100, 60, 0),  # bus
+        (100, 80, 0),  # train
+        (230, 0, 0),  # motorcycle
+        (32, 11, 119),  # bicycle
     ],
     dtype=np.uint8,
 )
-CITYSCAPES_COLORS_BGR = CITYSCAPES_COLORS[:, ::-1]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Load pidnet_s_cityscapes_val.onnx and show segmentation results for "
-            "one image, an image folder, or a video file."
+            "Load pretrained_dynamic.onnx (PIDNet with ArgMax + Softmax baked "
+            "in as output layers) and show segmentation results for one image, "
+            "an image folder, or a video file."
         )
     )
-    parser.add_argument(
-        "input",
-        help="Image file, directory containing images, or video file.",
-    )
+    parser.add_argument("input", help="Image file, directory containing images, or video file.")
     parser.add_argument(
         "--model",
         default=str(DEFAULT_MODEL),
-        help="ONNX model path. Defaults to pidnet_s_cityscapes_val.onnx in this repo.",
+        help="ONNX model path. Defaults to pretrained_dynamic.onnx in this repo.",
     )
     parser.add_argument(
-        "--input-size",
-        nargs=2,
-        type=int,
-        metavar=("HEIGHT", "WIDTH"),
-        default=None,
-        help="Resize input before inference. Defaults to the ONNX static input size.",
+        "--output",
+        choices=("labels", "masks"),
+        default="labels",
+        help=(
+            "Which baked-in output head to visualize. 'labels' is the "
+            "in-graph ArgMax result (nearest-neighbor upsampled). 'masks' is "
+            "the in-graph Softmax result, upsampled per-class before taking "
+            "argmax on the host for smoother boundaries."
+        ),
     )
-    parser.add_argument(
-        "--output-index",
-        type=int,
-        default=-1,
-        help="Output tensor index when the ONNX graph has multiple outputs.",
-    )
-    parser.add_argument("--num-classes", type=int, default=19)
     parser.add_argument(
         "--providers",
         nargs="+",
@@ -104,12 +107,7 @@ def parse_args() -> argparse.Namespace:
         default="overlay",
         help="Visualization mode.",
     )
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        default=0.55,
-        help="Segmentation overlay opacity for --view overlay.",
-    )
+    parser.add_argument("--alpha", type=float, default=0.55, help="Segmentation overlay opacity.")
     parser.add_argument(
         "--folder-delay-ms",
         type=int,
@@ -122,22 +120,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Delay between video frames. Defaults to the source FPS.",
     )
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help="Search image folders recursively.",
-    )
+    parser.add_argument("--recursive", action="store_true", help="Search image folders recursively.")
     parser.add_argument(
         "--max-display-size",
         type=int,
         default=1280,
         help="Resize only the displayed result so its longest side is at most this value. Use 0 to disable.",
     )
-    parser.add_argument(
-        "--window-name",
-        default="PIDNet ONNX Segmentation",
-        help="OpenCV imshow window name.",
-    )
+    parser.add_argument("--window-name", default="PIDNet ONNX Demo (ArgMax/Softmax)")
     return parser.parse_args()
 
 
@@ -147,7 +137,7 @@ def import_onnxruntime():
     except ImportError as exc:
         raise RuntimeError(
             "onnxruntime is required to run inference. Install dependencies with "
-            "`python3 -m pip install -r requirements.txt` or use this repo's .venv."
+            "`python3 -m pip install -r requirements.txt` or use this repo's venv."
         ) from exc
     return ort
 
@@ -170,63 +160,38 @@ def infer_static_input_size(input_shape: list[object]) -> tuple[int, int] | None
     return None
 
 
-def preprocess(image_bgr: np.ndarray, input_size: tuple[int, int] | None) -> np.ndarray:
-    if input_size is not None:
-        height, width = input_size
-        image_bgr = cv2.resize(image_bgr, (width, height), interpolation=cv2.INTER_LINEAR)
-
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    image_rgb -= np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    image_rgb /= np.array([0.229, 0.224, 0.225], dtype=np.float32)
+def preprocess(image_bgr: np.ndarray, input_size: tuple[int, int]) -> np.ndarray:
+    height, width = input_size
+    resized = cv2.resize(image_bgr, (width, height), interpolation=cv2.INTER_LINEAR)
+    image_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    image_rgb -= IMAGENET_MEAN
+    image_rgb /= IMAGENET_STD
     return np.expand_dims(image_rgb.transpose(2, 0, 1), axis=0).astype(np.float32)
 
 
-def resize_scores(scores: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+def labels_to_prediction(labels: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+    """Upsample the in-graph ArgMax output ("labels") to the original image size."""
+    prediction = np.squeeze(labels).astype(np.uint8)
+    if prediction.shape == target_hw:
+        return prediction
+    return cv2.resize(
+        prediction, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_NEAREST
+    )
+
+
+def masks_to_prediction(masks: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+    """Upsample the in-graph Softmax output ("masks") per class, then argmax on host."""
+    scores = np.squeeze(masks, axis=0)  # [num_classes, h, w]
     target_h, target_w = target_hw
     if scores.shape[-2:] == target_hw:
-        return scores
-
-    resized = np.empty((scores.shape[0], target_h, target_w), dtype=np.float32)
-    for class_idx in range(scores.shape[0]):
-        resized[class_idx] = cv2.resize(
-            scores[class_idx], (target_w, target_h), interpolation=cv2.INTER_LINEAR
-        )
-    return resized
-
-
-def output_to_prediction(
-    output: np.ndarray,
-    target_hw: tuple[int, int],
-    num_classes: int,
-) -> np.ndarray:
-    if output.ndim == 4 and output.shape[1] == num_classes:
-        scores = resize_scores(output[0], target_hw)
-        return np.argmax(scores, axis=0).astype(np.uint8)
-
-    if output.ndim == 4 and output.shape[-1] == num_classes:
-        scores = output[0].transpose(2, 0, 1)
-        scores = resize_scores(scores, target_hw)
-        return np.argmax(scores, axis=0).astype(np.uint8)
-
-    if output.ndim == 3 and output.shape[0] == num_classes:
-        scores = resize_scores(output, target_hw)
-        return np.argmax(scores, axis=0).astype(np.uint8)
-
-    if output.ndim == 3 and output.shape[-1] == num_classes:
-        scores = output.transpose(2, 0, 1)
-        scores = resize_scores(scores, target_hw)
-        return np.argmax(scores, axis=0).astype(np.uint8)
-
-    prediction = np.squeeze(output)
-    if prediction.ndim != 2:
-        raise ValueError(f"Unsupported ONNX output shape: {output.shape}")
-    if prediction.shape != target_hw:
-        prediction = cv2.resize(
-            prediction.astype(np.uint8),
-            (target_hw[1], target_hw[0]),
-            interpolation=cv2.INTER_NEAREST,
-        )
-    return prediction.astype(np.uint8)
+        resized = scores
+    else:
+        resized = np.empty((scores.shape[0], target_h, target_w), dtype=np.float32)
+        for class_idx in range(scores.shape[0]):
+            resized[class_idx] = cv2.resize(
+                scores[class_idx], (target_w, target_h), interpolation=cv2.INTER_LINEAR
+            )
+    return np.argmax(resized, axis=0).astype(np.uint8)
 
 
 def is_image_file(path: Path) -> bool:
@@ -239,11 +204,7 @@ def is_video_file(path: Path) -> bool:
 
 def find_images(input_dir: Path, recursive: bool) -> list[Path]:
     pattern = "**/*" if recursive else "*"
-    return sorted(
-        path
-        for path in input_dir.glob(pattern)
-        if path.is_file() and is_image_file(path)
-    )
+    return sorted(path for path in input_dir.glob(pattern) if path.is_file() and is_image_file(path))
 
 
 def colorize_prediction(prediction: np.ndarray) -> np.ndarray:
@@ -251,12 +212,7 @@ def colorize_prediction(prediction: np.ndarray) -> np.ndarray:
     return CITYSCAPES_COLORS_BGR[clipped]
 
 
-def make_visualization(
-    image_bgr: np.ndarray,
-    prediction: np.ndarray,
-    view: str,
-    alpha: float,
-) -> np.ndarray:
+def make_visualization(image_bgr: np.ndarray, prediction: np.ndarray, view: str, alpha: float) -> np.ndarray:
     color_mask = colorize_prediction(prediction)
     if view == "mask":
         return color_mask
@@ -269,12 +225,10 @@ def make_visualization(
 def resize_for_display(image: np.ndarray, max_display_size: int) -> np.ndarray:
     if max_display_size <= 0:
         return image
-
     height, width = image.shape[:2]
     longest = max(height, width)
     if longest <= max_display_size:
         return image
-
     scale = max_display_size / float(longest)
     new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
     return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
@@ -296,37 +250,35 @@ class PIDNetOnnxDemo:
 
         providers = choose_providers(args.providers)
         self.session = ort.InferenceSession(str(model_path), providers=providers)
+
         input_meta = self.session.get_inputs()[0]
         self.input_name = input_meta.name
-        self.input_size = (
-            tuple(args.input_size)
-            if args.input_size
-            else infer_static_input_size(input_meta.shape)
-        )
-        self.output_index = args.output_index
-        self.num_classes = args.num_classes
+        self.input_size = infer_static_input_size(input_meta.shape) or (512, 512)
+        self.output_name = args.output
+
+        output_names = {out.name for out in self.session.get_outputs()}
+        if self.output_name not in output_names:
+            raise ValueError(
+                f"Model has no '{self.output_name}' output. Available outputs: {sorted(output_names)}"
+            )
 
         print(f"Model: {model_path}")
         print(f"Providers: {self.session.get_providers()}")
-        print(
-            f"Input: {self.input_name}, shape={input_meta.shape}, "
-            f"demo_size={self.input_size}"
-        )
+        print(f"Input: {self.input_name}, shape={input_meta.shape}, resized_to={self.input_size}")
+        for out in self.session.get_outputs():
+            print(f"Output: {out.name}, shape={out.shape}, dtype={out.type}")
+        print(f"Visualizing output: {self.output_name}")
 
     def infer(self, image_bgr: np.ndarray) -> np.ndarray:
         ort_input = preprocess(image_bgr, self.input_size)
-        outputs = self.session.run(None, {self.input_name: ort_input})
-        selected = outputs[self.output_index]
-        return output_to_prediction(selected, image_bgr.shape[:2], self.num_classes)
+        (output,) = self.session.run([self.output_name], {self.input_name: ort_input})
+        target_hw = image_bgr.shape[:2]
+        if self.output_name == "labels":
+            return labels_to_prediction(output, target_hw)
+        return masks_to_prediction(output, target_hw)
 
 
-def show_result(
-    window_name: str,
-    title: str,
-    result: np.ndarray,
-    max_display_size: int,
-    delay_ms: int,
-) -> int:
+def show_result(window_name: str, title: str, result: np.ndarray, max_display_size: int, delay_ms: int) -> int:
     display = resize_for_display(result, max_display_size)
     try:
         cv2.imshow(window_name, display)
@@ -356,12 +308,7 @@ def destroy_windows() -> None:
         pass
 
 
-def run_image(
-    demo: PIDNetOnnxDemo,
-    image_path: Path,
-    args: argparse.Namespace,
-    wait_ms: int,
-) -> bool:
+def run_image(demo: PIDNetOnnxDemo, image_path: Path, args: argparse.Namespace, wait_ms: int) -> bool:
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Could not read image: {image_path}")

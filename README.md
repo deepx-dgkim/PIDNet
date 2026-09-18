@@ -1,315 +1,202 @@
-# PIDNet-S Cityscapes Accuracy Check
+# PIDNet on DEEPX NPU — Evaluation Example
 
-이 저장소는 공식 PIDNet-S Cityscapes checkpoint에서 export한 ONNX를 Cityscapes 데이터로 빠르게 검증하기 위한 최소 구성입니다. 원본 구현은 [XuJiacong/PIDNet](https://github.com/XuJiacong/PIDNet)을 기준으로 했고, Cityscapes 전처리는 PIDNet의 ImageNet mean/std 및 19개 trainId 매핑을 따릅니다.
+This repository is an example project for evaluating [PIDNet](https://github.com/XuJiacong/PIDNet)
+on a DEEPX NPU. It takes an official PIDNet-S Cityscapes checkpoint, exports it to
+ONNX with the post-processing (ArgMax / Softmax) moved into the graph so the NPU does
+that work instead of the host CPU, and provides demo and accuracy-evaluation scripts
+for both the ONNX model and the DXNN model compiled from it.
 
-## 설치
+## Model provenance
+
+The pretrained model comes from the official
+[XuJiacong/PIDNet](https://github.com/XuJiacong/PIDNet) repository — specifically the
+PIDNet-S Cityscapes checkpoint (`PIDNet_S_Cityscapes_val.pt` or
+`PIDNet_S_Cityscapes_test.pt`), distributed from that repository's README via Google
+Drive. `modify.py` needs the PIDNet-S model *definition* (not the full training repo)
+to load that checkpoint and export it; this project vendors only the three files that
+definition actually requires — `models/__init__.py`, `models/pidnet.py`, and
+`models/model_utils.py`, copied as-is from `models/` in the official repository —
+instead of a full clone. They are pure PyTorch (`torch`, `torch.nn`,
+`torch.nn.functional` only) with no dependency on the rest of that repository
+(training tools, configs, datasets, etc.).
+
+> **Checkpoint sanity check:** the official architecture includes the `pag3`, `pag4`,
+> and `dfm` boundary/detail fusion modules. If you load a checkpoint that is missing
+> those (for example because it was trained with a different, "simplified" variant of
+> PIDNet), PyTorch's `strict=False` loading will silently leave them randomly
+> initialized and the exported model will produce plausible-looking but wrong
+> segmentation. Always confirm `matched == len(model.state_dict())` when loading a new
+> checkpoint before trusting anything exported from it. See `ANALYSIS.md` for a worked
+> example of this exact failure and how it was diagnosed.
+
+## Repository layout
+
+```text
+PIDNet/
+├── modify.py                    # Export: checkpoint -> ONNX with ArgMax + Softmax baked in
+├── models/                      # PIDNet-S model definition, vendored from XuJiacong/PIDNet
+│   ├── __init__.py
+│   ├── pidnet.py
+│   └── model_utils.py
+├── pidnet_demo_onnx.py          # ONNX demo (image / image folder / video)
+├── pidnet_demo_dxnn.py          # DXNN demo (video, async NPU pipeline)
+├── download_cityscapes_small.py # Fetches a small Cityscapes validation subset
+├── eval_cityscapes_onnx.py      # mIoU / pixel accuracy / mean accuracy for an ONNX model
+├── eval_cityscapes_dxnn.py      # Same, for a compiled DXNN model
+├── compare_onnx_dxnn.py         # ONNX vs. DXNN output consistency (cosine similarity)
+└── ANALYSIS.md                  # Root-cause writeup of a checkpoint/architecture mismatch found during development
+```
+
+## 1. Install dependencies
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 python -m pip install -U pip
 python -m pip install -r requirements.txt
-python -m pip install datasets
 ```
 
-GPU에서 ONNX Runtime을 쓰려면 CPU 패키지 대신 환경에 맞는 `onnxruntime-gpu`를 설치하세요.
+`requirements.txt` includes `torch` and `onnxscript`, needed only for the export step
+(step 2) — they pull in a sizeable CUDA toolchain, so expect a multi-GB download.
+DXNN-related steps additionally require the DEEPX DXRT Python package (`dx_engine`)
+and a connected DEEPX NPU.
+
+## 2. Export the checkpoint to ONNX
+
+Download `PIDNet_S_Cityscapes_test.pt` from the
+official repository's Google Drive link and place it somewhere in this repo (for
+example at the repo root).
+
+`modify.py` wraps the PIDNet-S backbone with the two output layers this project
+needs the NPU to compute, instead of doing them on the host after inference:
+
+```python
+logits = backbone(x)                  # [B, 19, H, W]
+labels = torch.argmax(logits, dim=1)  # int64  [B, H, W]      -> NPU-side ArgMax
+masks  = F.softmax(logits, dim=1)     # float32 [B, 19, H, W] -> NPU-side Softmax
+```
+
+Export with a fixed **batch size of 1** and a fixed **512×512 input**:
 
 ```bash
-python -m pip uninstall -y onnxruntime
-python -m pip install onnxruntime-gpu
+python modify.py \
+  --p PIDNet_S_Cityscapes_test.pt \
+  --height 512 --width 512 \
+  --batch_size 1 \
+  --o pretrained_dynamic.onnx
 ```
 
-## Cityscapes 데이터 준비
+## 3. Run the ONNX demo
 
-이 저장소의 빠른 accuracy check는 `cityscapes_small` 폴더를 사용합니다. `scripts/download_cityscapes_small.py`는 Hugging Face의 `Chris1/cityscapes` validation split을 streaming으로 읽어서 500장을 아래 구조로 저장합니다.
-
-```text
-cityscapes_small/
-  images/
-    000000.png
-    ...
-  masks/
-    000000_mask.png
-    ...
-```
-
-처음 한 번만 다음처럼 준비하면 됩니다.
+`pidnet_demo_onnx.py` accepts an image file or a video file:
 
 ```bash
-python scripts/download_cityscapes_small.py
+python pidnet_demo_onnx.py assets/images/000341.png --model pretrained_dynamic.onnx
+python pidnet_demo_onnx.py assets/videos/pidnet-test.mp4 --model pretrained_dynamic.onnx
 ```
 
-스크립트 기본값은 `OUT_DIR = "cityscapes_small"`, `SPLIT = "validation"`, `NUM_SAMPLES = 500`입니다. 다른 개수나 split이 필요하면 스크립트 상단 값을 바꾼 뒤 다시 실행하세요. 저장된 mask는 Cityscapes label ID 형식이므로, 평가 스크립트의 기본값인 `--label-format auto`가 PIDNet의 19-class trainId로 변환합니다.
+Useful flags: `--output {labels,masks}` selects which baked-in head to visualize,
+`--view {overlay,mask,side-by-side}` controls the visualization, `--alpha` controls
+overlay opacity, `--max-display-size` caps the preview window size. Run
+`python pidnet_demo_onnx.py --help` for the full list.
 
+## 4. Evaluate ONNX accuracy on Cityscapes
 
-## PIDNet-S Cityscapes ONNX Export
-
-공식 PIDNet-S Cityscapes checkpoint가 있으면 다음처럼 ONNX를 다시 만들 수 있습니다. 공식 repo는 `PIDNet_S_Cityscapes_val.pt`, `PIDNet_S_Cityscapes_test.pt`를 Cityscapes PIDNet-S 가중치로 제공합니다.
-
-이 저장소의 export 스크립트는 입력 더미 텐서를 `1x3x1024x2048`로 만들고 `dynamic_axes`를 쓰지 않으므로 ONNX 입력/출력의 batch size가 `1`로 고정됩니다. 다른 해상도로 고정하고 싶으면 `--height`, `--width`만 바꿔서 다시 export하세요.
+Fetch a small Cityscapes validation subset once:
 
 ```bash
-git clone https://github.com/XuJiacong/PIDNet external/PIDNet
-
-# PyTorch와 ONNX export 의존성 설치
-python -m pip install torch onnx
+python download_cityscapes_small.py
 ```
 
-현재 디렉터리에 내려받은 공식 `.pt` 파일이 있다면 그대로 지정해서 export할 수 있습니다. 아래 google drive 에서 다운로드 가능합니다.
-아래 google driver 에서 `PIDNet_S_Cityscapes_val.pt` 와 `PIDNet_S_Cityscapes_test.pt` 를 다운로드 합니다. 
-https://drive.google.com/drive/folders/0BySIOtxxULinfjlGdGFiT3NQVUdLVDBxWnhhTjB4VXNBRkFOa281WHlkektYY2VBcWVZb1k?resourcekey=0-w0JIXUekD-FCW-Rm1Z-HfQ&usp=sharing
+Then evaluate mIoU / pixel accuracy / mean accuracy. `--output-index -1` selects the
+`masks` (Softmax) head, whose per-class scores are equivalent to raw logits for
+argmax-based accuracy metrics:
 
 ```bash
-# val checkpoint -> ONNX
-python scripts/export_pidnet_s_cityscapes_onnx.py \
-  --pidnet-repo external/PIDNet \
-  --checkpoint PIDNet_S_Cityscapes_val.pt \
-  --output pidnet_s_cityscapes_val.onnx
-
-# test checkpoint -> ONNX
-python scripts/export_pidnet_s_cityscapes_onnx.py \
-  --pidnet-repo external/PIDNet \
-  --checkpoint PIDNet_S_Cityscapes_test.pt \
-  --output pidnet_s_cityscapes_test.onnx
-```
-
-
-## cityscapes_small Accuracy 확인
-
-이미 `cityscapes_small` 폴더에 500장 데이터가 준비되어 있으면 바로 실행할 수 있습니다. 스크립트는 기본적으로 아래 구조를 읽습니다.
-
-```text
-cityscapes_small/
-  images/
-    000000.png
-    ...
-  masks/
-    000000_mask.png
-    ...
-```
-
-공식 PIDNet-S Cityscapes val checkpoint에서 export한 ONNX는 공정한 validation 지표 확인용으로 사용합니다.
-
-```bash
-python scripts/eval_cityscapes_onnx.py \
-  --model pidnet_s_cityscapes_val.onnx \
+python eval_cityscapes_onnx.py \
+  --model pretrained_dynamic.onnx \
   --dataset-root cityscapes_small \
-  --save-json metrics/pidnet_s_cityscapes_val_small.json
+  --output-index -1 \
+  --save-json metrics/pretrained_dynamic_onnx.json
 ```
 
-공식 PIDNet-S Cityscapes test checkpoint에서 export한 ONNX는 데모/시각화 품질 확인용으로 사용합니다.
+## 5. Compile to DXNN
+
+Compiling the ONNX model into a `.dxnn` file for the DEEPX NPU is **out of scope for
+this repository** — it is done manually by the DEEPX engineering team using internal
+compilation tooling, not by a script here. The compiled model is expected to expose
+the same two outputs as the ONNX model, `labels` and `masks`, at the same 1/8-resolution
+shapes, so that the demo and evaluation scripts below work against it unchanged.
+
+## 6. Run the DXNN demo
+
+`pidnet_demo_dxnn.py` runs the compiled DXNN model through an async NPU inference pipeline
+(separate reader / submit / wait / postprocess threads) for maximum throughput:
 
 ```bash
-python scripts/eval_cityscapes_onnx.py \
-  --model pidnet_s_cityscapes_test.onnx \
+python pidnet_demo_dxnn.py assets/videos/pidnet-test.mp4 --model pidnet_argmax_softmax.dxnn
+```
+
+It shares the same flag names as `pidnet_demo_onnx.py` (`--output`, `--view`,
+`--alpha`, `--max-display-size`, `--window-name`) for consistency. Run
+`python pidnet_demo_dxnn.py --help` for the full list.
+
+> **Video only, for now.** `pidnet_demo_dxnn.py`'s async pipeline is currently built around
+> a single video stream and does not accept a single image file. An image-input DXNN
+> demo is planned but not yet implemented in this repository.
+
+## 7. Evaluate DXNN accuracy on Cityscapes
+
+Same dataset, same metrics, against the compiled model:
+
+```bash
+python eval_cityscapes_dxnn.py \
+  --model pidnet_argmax_softmax.dxnn \
   --dataset-root cityscapes_small \
-  --save-json metrics/pidnet_s_cityscapes_test_small.json
-```
-
-현재 `cityscapes_small` 500장 기준 측정 결과:
-
-| ONNX | mIoU | Pixel Accuracy | Mean Accuracy |
-|---|---:|---:|---:|
-| `pidnet_s_cityscapes_val.onnx` | 76.56% | 95.33% | 84.43% |
-| `pidnet_s_cityscapes_test.onnx` | 84.84% | 96.78% | 91.54% |
-
-`PIDNet_S_Cityscapes_test.pt`는 train+val로 학습된 test 제출용 가중치일 수 있으므로, `cityscapes_small`이 val 이미지 기반이면 수치가 높게 나올 수 있습니다.
-
-일부만 빠르게 확인:
-
-```bash
-python scripts/eval_cityscapes_onnx.py \
-  --model pidnet_s_cityscapes_val.onnx \
-  --dataset-root cityscapes_small \
-  --limit 20
-```
-
-`cityscapes_small/masks`의 값은 Cityscapes 원본 label ID 형식이라 기본값인 `--label-format auto`가 label ID를 PIDNet의 19-class trainId로 변환합니다. 만약 다른 데이터셋에서 이미 trainId `0..18, 255` 형태의 마스크를 쓰면 다음 옵션을 추가하세요.
-
-```bash
-python scripts/eval_cityscapes_onnx.py \
-  --model pidnet_s_cityscapes_val.onnx \
-  --dataset-root cityscapes_small \
-  --label-format trainid
-```
-
-## ONNX Demo
-
-`demo_onnx.py`는 `pidnet_s_cityscapes_val.onnx`를 기본으로 로드하고, 입력으로 단일 이미지 파일, 이미지 폴더, 비디오 파일을 받을 수 있습니다. 추론 결과는 OpenCV `imshow` 창에 실시간으로 표시하며 따로 저장하지 않습니다. 이미지 폴더나 비디오 입력에서는 이전 결과를 지우고 새 프레임의 segmentation 결과만 계속 갱신합니다.
-
-```bash
-# 단일 이미지
-python scripts/demo_onnx.py external/PIDNet/samples/frankfurt_000000_002196_leftImg8bit.png
-
-# 이미지 폴더
-python scripts/demo_onnx.py cityscapes_small/images
-
-# 비디오 파일
-python scripts/demo_onnx.py assets/videos/pidnet-test.mp4
-```
-
-기본 화면은 원본 이미지 위에 Cityscapes segmentation 색상을 overlay합니다. mask만 보거나 원본/overlay를 나란히 보고 싶으면 다음 옵션을 사용할 수 있습니다.
-
-```bash
-python scripts/demo_onnx.py cityscapes_small/images --view mask
-python scripts/demo_onnx.py assets/videos/pidnet-test.mp4 --view side-by-side
-```
-
-다른 ONNX를 사용하려면 `--model`을 지정하세요.
-
-```bash
-python scripts/demo_onnx.py cityscapes_small/images \
-  --model pidnet_s_cityscapes_test.onnx
-```
-
-실행 중 `q` 또는 `Esc`를 누르면 종료됩니다. `imshow`를 사용하므로 GUI 표시가 가능한 환경이 필요합니다.
-
-### ONNX Async Video Demo
-
-비디오 입력에서 preview와 ONNX inference를 분리해 더 높은 처리량을 보고 싶으면 `demo_onnx_async.py`를 사용할 수 있습니다. 기본값은 preview loop를 1ms wait로 돌리고, ONNX Runtime provider에 따라 inference worker 수를 자동 선택합니다.
-
-```bash
-python scripts/demo_onnx_async.py assets/videos/pidnet-test.mp4 
-```
-
-GPU/CPU 환경에 맞춰 worker 수를 직접 조정할 수도 있습니다.
-
-```bash
-python scripts/demo_onnx_async.py assets/videos/pidnet-test.mp4  \
-  --inference-workers 2 \
-  --frame-queue-size 4 \
-  --result-queue-size 4
-```
-
-실시간 스트림처럼 최신 프레임 latency가 더 중요하면 오래된 입력 프레임을 버리도록 설정할 수 있습니다.
-
-```bash
-python scripts/demo_onnx_async.py assets/videos/pidnet-test.mp4 --drop-input-frames
-```
-
-## DXNN Accuracy 확인
-
-DXNN 모델은 `dxnn/` 폴더의 `.dxnn` 파일을 사용합니다. 실행 환경에는 DEEPX DXRT Python 패키지의 `dx_engine` 모듈이 설치되어 있어야 합니다.
-
-```bash
-python -c "from dx_engine import InferenceEngine; print('dx_engine ok')"
-```
-
-`cityscapes_small` 데이터가 준비되어 있으면 다음처럼 DXNN accuracy를 확인할 수 있습니다.
-
-```bash
-# val DXNN
-python scripts/eval_cityscapes_dxnn.py \
-  --model dxnn/pidnet_s_cityscapes_val.dxnn \
-  --dataset-root cityscapes_small \
-  --save-json metrics/pidnet_s_cityscapes_val_dxnn_small.json
-
-# test DXNN
-python scripts/eval_cityscapes_dxnn.py \
-  --model dxnn/pidnet_s_cityscapes_test.dxnn \
-  --dataset-root cityscapes_small \
+  --output-index -1 \
   --input-color rgb \
-  --save-json metrics/pidnet_s_cityscapes_test_dxnn_small.json
+  --save-json metrics/pidnet_argmax_softmax_dxnn.json
 ```
 
-일부 이미지만 빠르게 확인하려면 `--limit`을 추가하세요.
+`--input-color rgb` is required here: `eval_cityscapes_dxnn.py` defaults to
+`bgr`, but every model exported by `modify.py` (and `pidnet_demo_dxnn.py`) expects RGB
+input, matching PIDNet's original training-time preprocessing. Leaving this at the
+default `bgr` silently feeds the wrong color order and produces a misleadingly low
+score that reflects a preprocessing mismatch, not model quality.
+
+Compare the resulting `metrics/*.json` files (mIoU, pixel accuracy, mean accuracy)
+against the ONNX evaluation from step 4 to quantify any accuracy drop introduced by
+NPU compilation (quantization, in particular).
+
+## 8. ONNX vs. DXNN output consistency (cosine similarity)
+
+Beyond dataset-level mIoU, it is useful to check that the ONNX model and the compiled
+DXNN model produce numerically consistent per-pixel outputs on the same input, since
+mIoU alone can hide a shift that happens to still pick the same argmax class most of
+the time. `compare_onnx_dxnn.py` does this by comparing each model's `masks`
+(Softmax) output at the network's native 1/8-resolution stride, before any
+upsampling:
 
 ```bash
-python scripts/eval_cityscapes_dxnn.py \
-  --model dxnn/pidnet_s_cityscapes_val.dxnn \
+python compare_onnx_dxnn.py \
+  --onnx-model pretrained_dynamic.onnx \
+  --dxnn-model pidnet_argmax_softmax.dxnn \
   --dataset-root cityscapes_small \
-  --limit 20
+  --save-json metrics/onnx_vs_dxnn.json
 ```
 
-현재 `cityscapes_small` 500장 기준 DXNN 측정 결과:
+For each image, it computes:
+- **Per-pixel cosine similarity** between the two models' 19-class score vectors at
+  every spatial location (`cos_sim = dot(a, b) / (norm(a) * norm(b))`), pooled across
+  the whole dataset rather than reported as a single number — mean, min, and the
+  fraction of pixels below `--threshold` (default `0.98`) — since quantization error
+  is not uniform across classes or regions.
+- **Per-pixel argmax agreement**, as a cross-check against the mIoU delta from step 7:
+  a large cosine-similarity drop with a small argmax-agreement drop usually means
+  quantization is shifting *confidence* without yet flipping the predicted class;
+  investigate before it does.
 
-| DXNN | mIoU | Pixel Accuracy | Mean Accuracy |
-|---|---:|---:|---:|
-| `pidnet_s_cityscapes_val.dxnn` | 29.53% | 75.54% | 37.84% |
-| `pidnet_s_cityscapes_test.dxnn` | 40.00% | 79.55% | 46.69% |
-| `pidnet_s_cityscapes_val_calib100.dxnn` | 29.53% | 75.65% | 37.82% |
-
-예측 trainId mask를 PNG로 저장하려면 `--save-preds`를 지정합니다.
-
-```bash
-python scripts/eval_cityscapes_dxnn.py \
-  --model dxnn/pidnet_s_cityscapes_val.dxnn \
-  --dataset-root cityscapes_small \
-  --save-preds outputs/dxnn_val_preds
-```
-
-## DXNN Demo
-
-`demo_dxnn.py`는 `dxnn/pidnet_s_cityscapes_val.dxnn`을 기본으로 로드하고, ONNX demo와 동일하게 단일 이미지 파일, 이미지 폴더, 비디오 파일을 입력으로 받을 수 있습니다. 추론 결과는 OpenCV `imshow` 창에 실시간으로 표시합니다.
-
-```bash
-# 단일 이미지
-python scripts/demo_dxnn.py external/PIDNet/samples/frankfurt_000000_002196_leftImg8bit.png
-
-# 이미지 폴더
-python scripts/demo_dxnn.py cityscapes_small/images
-
-# 비디오 파일
-python scripts/demo_dxnn.py assets/videos/pidnet-test.mp4 
-```
-
-화면 출력 방식은 `--view`로 바꿀 수 있습니다.
-
-```bash
-python scripts/demo_dxnn.py cityscapes_small/images --view mask
-python scripts/demo_dxnn.py assets/videos/pidnet-test.mp4  --view side-by-side
-```
-
-다른 DXNN 모델을 사용할 때는 `--model`을 지정하세요. `pidnet_s_cityscapes_test.dxnn`은 기존 측정과 동일하게 `--input-color rgb`를 함께 지정합니다.
-
-```bash
-python scripts/demo_dxnn.py cityscapes_small/images \
-  --model dxnn/pidnet_s_cityscapes_test.dxnn \
-  --input-color rgb
-```
-
-실행 중 `q` 또는 `Esc`를 누르면 종료됩니다. `imshow`를 사용하므로 GUI 표시가 가능한 환경이 필요합니다.
-
-### DXNN Async Video Demo
-
-비디오 입력에서 NPU를 최대한 계속 바쁘게 유지하려면 `demo_dxnn_async.py`를 사용할 수 있습니다. DXRT `run_async`/`wait` 파이프라인으로 capture, submit/wait, postprocess, preview를 분리하며 기본 NPU 바인딩은 `NPU_ALL`입니다. 테스트 비디오는 `assets/videos/pidnet-test.mp4` 경로에 둡니다.
-
-```bash
-python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4
-```
-
-NPU 처리량 측정처럼 preview 비용을 제외하고 보고 싶으면 `--no-preview`를 사용하세요.
-
-```bash
-python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4 --no-preview
-```
-
-결과를 비디오 파일로 저장하려면 `-s`를 사용하세요. 저장 모드에서는 preview가 자동으로 꺼지고, 모든 결과 프레임을 보존하도록 동작합니다. `-s`만 주면 입력 파일 옆에 `<input>_dxnn_async.mp4`로 저장하고, 경로를 직접 지정할 수도 있습니다.
-
-```bash
-python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4 -s
-python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4 -s outputs/pidnet_async.mp4
-```
-
-프리뷰를 보면서 결과 프레임을 건너뛰지 않으려면 `--preview-all-results`를 사용하세요. 이 모드는 모든 postprocess 결과를 frame 순서대로 표시하므로 drop을 피할 수 있지만, display가 느릴 때 latency가 커지고 NPU 처리량이 낮아질 수 있습니다.
-
-```bash
-python3 scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4 \
-  --max-display-size 0 \
-  --video-delay-ms 1 \
-  --accurate-score-resize \
-  --postprocess-workers 4 \
-  --preview-all-results \
-  --input-color rgb
-```
-
-기본 async depth는 DXRT `buffer_count`를 따릅니다. 장치와 모델 상태에 맞춰 in-flight job 수를 직접 키워볼 수 있습니다.
-
-```bash
-python scripts/demo_dxnn_async.py assets/videos/pidnet-test.mp4  \
-  --max-inflight 8 \
-  --buffer-count 8 \
-  --postprocess-workers 2
-```
-
-모든 프레임의 postprocess 결과를 보존해야 하면 `--keep-all-results`를 추가하세요. 이 옵션은 CPU postprocess가 느릴 때 NPU 처리량을 낮출 수 있습니다.
+Use `--images-dir` to point at a plain folder of images instead of a
+`cityscapes_small`-shaped dataset (for a quick smoke test, e.g. `--images-dir
+assets/images`). `--dxnn-input-color` defaults to `rgb` for the same reason
+`--input-color rgb` is required in step 7.

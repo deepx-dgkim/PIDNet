@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Minimal async PIDNet DXNN video demo."""
+"""Async PIDNet DXNN video demo for pidnet_argmax_softmax.dxnn.
+
+CLI shape matches pidnet_demo_onnx.py so the two demos read the same way;
+this one keeps its async NPU inference pipeline (reader/submitter/waiter/
+postprocessor threads) for maximum throughput instead of the simple
+synchronous loop used by the ONNX demo.
+"""
 
 from __future__ import annotations
 
@@ -16,10 +22,12 @@ import numpy as np
 from dx_engine import InferenceEngine, InferenceOption
 
 
+REPO_ROOT = Path(__file__).resolve().parent
+DEFAULT_MODEL = REPO_ROOT / "pidnet_argmax_softmax.dxnn"
+
 QUIT_KEYS = {27, ord("q"), ord("Q")}
 STOP = object()
 NUM_CLASSES = 19
-ALPHA = 0.55
 POSTPROCESS_WORKERS = 4
 
 CITYSCAPES_COLORS_BGR = np.array(
@@ -151,7 +159,7 @@ class Stats:
 
 
 class PIDNet:
-    def __init__(self, model_path: Path) -> None:
+    def __init__(self, model_path: Path, output_name: str) -> None:
         option = InferenceOption()
         option.bound_option = InferenceOption.BOUND_OPTION.NPU_ALL
         self.engine = InferenceEngine(str(model_path), option)
@@ -165,7 +173,13 @@ class PIDNet:
         self.input_size = static_input_size(self.input_shape, self.input_layout)
         self.input_bytes = self.engine.get_input_size()
         self.output_info = output_info
-        self.output_index = -1
+        self.output_names = [info["name"] for info in output_info]
+        if output_name not in self.output_names:
+            raise ValueError(
+                f"Model has no '{output_name}' output. Available outputs: {self.output_names}"
+            )
+        self.output_name = output_name
+        self.output_index = self.output_names.index(output_name)
 
         selected = output_info[self.output_index]
         print(f"Model: {model_path}")
@@ -175,11 +189,13 @@ class PIDNet:
             f"dtype={self.input_dtype.name}, layout={self.input_layout}, "
             f"demo_size={self.input_size}, color=rgb"
         )
-        print(
-            "Output: "
-            f"{selected['name']}, shape={selected['shape']}, "
-            f"dtype={np.dtype(selected['dtype']).name}"
-        )
+        for info in output_info:
+            print(
+                "Output: "
+                f"{info['name']}, shape={info['shape']}, "
+                f"dtype={np.dtype(info['dtype']).name}"
+            )
+        print(f"Visualizing output: {self.output_name}")
         print(
             "DXRT option: "
             f"bound={self.option.bound_option.name}, "
@@ -220,13 +236,50 @@ class PIDNet:
     def prediction(self, outputs: list[np.ndarray], target_hw: tuple[int, int]) -> np.ndarray:
         output = outputs[self.output_index]
         output = reshape_output(output, self.output_info[self.output_index])
-        return output_to_prediction(output, target_hw)
+        if self.output_name == "labels":
+            return labels_to_prediction(output, target_hw)
+        return masks_to_prediction(output, target_hw)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run PIDNet DXNN async video demo.")
-    parser.add_argument("-m", "--model", required=True, help="DXNN model path.")
-    parser.add_argument("-v", "--video", required=True, help="Input video path.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Load pidnet_argmax_softmax.dxnn (PIDNet with ArgMax + Softmax baked "
+            "in as output layers) and run a real-time video demo with an async "
+            "NPU inference pipeline."
+        )
+    )
+    parser.add_argument("input", help="Video file.")
+    parser.add_argument(
+        "--model",
+        default=str(DEFAULT_MODEL),
+        help="DXNN model path. Defaults to pidnet_argmax_softmax.dxnn in this repo.",
+    )
+    parser.add_argument(
+        "--output",
+        choices=("labels", "masks"),
+        default="labels",
+        help=(
+            "Which baked-in output head to visualize. 'labels' is the in-graph "
+            "ArgMax result (nearest-neighbor upsampled). 'masks' is the in-graph "
+            "Softmax result, upsampled per-class before taking argmax on the host "
+            "for smoother boundaries."
+        ),
+    )
+    parser.add_argument(
+        "--view",
+        choices=("overlay", "mask", "side-by-side"),
+        default="overlay",
+        help="Visualization mode.",
+    )
+    parser.add_argument("--alpha", type=float, default=0.55, help="Segmentation overlay opacity.")
+    parser.add_argument(
+        "--max-display-size",
+        type=int,
+        default=1280,
+        help="Resize only the displayed result so its longest side is at most this value. Use 0 to disable.",
+    )
+    parser.add_argument("--window-name", default="PIDNet DXNN Demo (ArgMax/Softmax)")
     return parser.parse_args()
 
 
@@ -269,30 +322,21 @@ def resize_scores(scores: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
     return resized
 
 
-def output_to_prediction(output: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
-    if output.ndim == 4 and output.shape[1] == NUM_CLASSES:
-        scores = resize_scores(output[0], target_hw)
-        return np.argmax(scores, axis=0).astype(np.uint8)
-    if output.ndim == 4 and output.shape[-1] == NUM_CLASSES:
-        scores = resize_scores(output[0].transpose(2, 0, 1), target_hw)
-        return np.argmax(scores, axis=0).astype(np.uint8)
-    if output.ndim == 3 and output.shape[0] == NUM_CLASSES:
-        scores = resize_scores(output, target_hw)
-        return np.argmax(scores, axis=0).astype(np.uint8)
-    if output.ndim == 3 and output.shape[-1] == NUM_CLASSES:
-        scores = resize_scores(output.transpose(2, 0, 1), target_hw)
-        return np.argmax(scores, axis=0).astype(np.uint8)
+def labels_to_prediction(labels: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+    """Upsample the in-graph ArgMax output ("labels") to the original frame size."""
+    prediction = np.squeeze(labels).astype(np.uint8)
+    if prediction.shape == target_hw:
+        return prediction
+    return cv2.resize(
+        prediction, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_NEAREST
+    )
 
-    prediction = np.squeeze(output)
-    if prediction.ndim != 2:
-        raise ValueError(f"Unsupported output shape: {output.shape}")
-    if prediction.shape != target_hw:
-        prediction = cv2.resize(
-            prediction.astype(np.uint8),
-            (target_hw[1], target_hw[0]),
-            interpolation=cv2.INTER_NEAREST,
-        )
-    return prediction.astype(np.uint8)
+
+def masks_to_prediction(masks: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+    """Upsample the in-graph Softmax output ("masks") per class, then argmax on host."""
+    scores = np.squeeze(masks, axis=0)  # [num_classes, h, w]
+    resized = resize_scores(scores, target_hw)
+    return np.argmax(resized, axis=0).astype(np.uint8)
 
 
 def put_blocking(items: queue.Queue[Any], item: Any, stop_event: threading.Event) -> bool:
@@ -463,13 +507,34 @@ def drain_results(results: queue.Queue[Any]) -> tuple[list[Result], int]:
     return drained, stops
 
 
-def colorize(prediction: np.ndarray) -> np.ndarray:
+def colorize_prediction(prediction: np.ndarray) -> np.ndarray:
     return CITYSCAPES_COLORS_BGR[np.clip(prediction, 0, NUM_CLASSES - 1)]
 
 
-def make_frame(result: Result, stats: Stats) -> np.ndarray:
-    mask = colorize(result.prediction)
-    frame = cv2.addWeighted(result.image, 1.0 - ALPHA, mask, ALPHA, 0.0)
+def make_visualization(image_bgr: np.ndarray, prediction: np.ndarray, view: str, alpha: float) -> np.ndarray:
+    color_mask = colorize_prediction(prediction)
+    if view == "mask":
+        return color_mask
+    if view == "side-by-side":
+        overlay = cv2.addWeighted(image_bgr, 1.0 - alpha, color_mask, alpha, 0.0)
+        return np.hstack((image_bgr, overlay))
+    return cv2.addWeighted(image_bgr, 1.0 - alpha, color_mask, alpha, 0.0)
+
+
+def resize_for_display(image: np.ndarray, max_display_size: int) -> np.ndarray:
+    if max_display_size <= 0:
+        return image
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest <= max_display_size:
+        return image
+    scale = max_display_size / float(longest)
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+
+
+def make_frame(result: Result, stats: Stats, view: str, alpha: float) -> np.ndarray:
+    frame = make_visualization(result.image, result.prediction, view, alpha)
     return add_status_overlay(frame, result, stats)
 
 
@@ -527,7 +592,14 @@ def add_status_overlay(image: np.ndarray, result: Result, stats: Stats) -> np.nd
     return output
 
 
-def show(window_name: str, video_path: Path, result: Result, display: np.ndarray, stats: Stats) -> int:
+def show(
+    window_name: str,
+    video_path: Path,
+    result: Result,
+    display: np.ndarray,
+    stats: Stats,
+    max_display_size: int,
+) -> int:
     snapshot = stats.snapshot()
     elapsed = max(time.perf_counter() - snapshot["start_at"], 1e-9)
     preview_fps = snapshot["displayed"] / elapsed
@@ -537,7 +609,7 @@ def show(window_name: str, video_path: Path, result: Result, display: np.ndarray
         f"inflight {snapshot['inflight']}/{snapshot['inflight_max']}"
     )
     try:
-        cv2.imshow(window_name, display)
+        cv2.imshow(window_name, resize_for_display(display, max_display_size))
         try:
             cv2.setWindowTitle(window_name, title)
         except cv2.error:
@@ -568,7 +640,7 @@ def print_summary(stats: Stats) -> None:
     )
 
 
-def run(model: PIDNet, video_path: Path) -> None:
+def run(model: PIDNet, video_path: Path, args: argparse.Namespace) -> None:
     max_inflight = max(1, int(model.option.buffer_count))
     frame_queue: queue.Queue[Any] = queue.Queue(maxsize=max(2 * max_inflight, 8))
     request_queue: queue.Queue[Any] = queue.Queue(maxsize=max_inflight)
@@ -578,7 +650,7 @@ def run(model: PIDNet, video_path: Path) -> None:
     stop_event = threading.Event()
     stats = Stats()
     slots = threading.BoundedSemaphore(max_inflight)
-    window_name = "PIDNet DXNN Demo"
+    window_name = args.window_name
 
     threads = [
         threading.Thread(target=reader, args=(video_path, frame_queue, errors, stats, stop_event), daemon=True),
@@ -621,7 +693,8 @@ def run(model: PIDNet, video_path: Path) -> None:
             while next_frame in pending:
                 result = pending.pop(next_frame)
                 stats.add_displayed()
-                key = show(window_name, video_path, result, make_frame(result, stats), stats)
+                frame = make_frame(result, stats, args.view, args.alpha)
+                key = show(window_name, video_path, result, frame, stats, args.max_display_size)
                 next_frame += 1
                 emitted = True
                 if key in QUIT_KEYS:
@@ -648,15 +721,15 @@ def run(model: PIDNet, video_path: Path) -> None:
 def main() -> None:
     args = parse_args()
     model_path = Path(args.model)
-    video_path = Path(args.video)
+    video_path = Path(args.input)
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    model = PIDNet(model_path)
+    model = PIDNet(model_path, args.output)
     try:
-        run(model, video_path)
+        run(model, video_path, args)
     finally:
         model.close()
 
