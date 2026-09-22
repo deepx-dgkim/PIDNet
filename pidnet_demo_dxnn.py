@@ -258,12 +258,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         choices=("labels", "masks"),
-        default="labels",
+        default="masks",
         help=(
             "Which baked-in output head to visualize. 'labels' is the in-graph "
             "ArgMax result (nearest-neighbor upsampled). 'masks' is the in-graph "
             "Softmax result, upsampled per-class before taking argmax on the host "
-            "for smoother boundaries."
+            "for smoother boundaries (default: masks)."
         ),
     )
     parser.add_argument(
