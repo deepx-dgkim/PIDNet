@@ -34,7 +34,8 @@ PIDNet/
 ├── download_cityscapes_small.py # Fetches a small Cityscapes validation subset
 ├── eval_cityscapes_onnx.py      # mIoU / pixel accuracy / mean accuracy for an ONNX model
 ├── eval_cityscapes_dxnn.py      # Same, for a compiled DXNN model
-└── compare_onnx_dxnn.py         # ONNX vs. DXNN output consistency (cosine similarity)
+├── compare_onnx_dxnn.py         # ONNX vs. DXNN masks consistency (cosine similarity)
+└── compare_labels_masks.py      # labels vs. argmax(masks) consistency check
 ```
 
 ## 1. Install dependencies
@@ -71,7 +72,7 @@ python pidnet_demo_onnx.py assets/videos/pidnet-test.mp4 --model pretrained_dyna
 ```
 
 Flags: `--output {labels,masks}`, `--view {overlay,mask,side-by-side}`, `--alpha`,
-`--max-display-size`. `--help` for the full list.
+`--max-display-size`. `masks` is the default output. `--help` for the full list.
 
 ## 4. Evaluate ONNX accuracy on Cityscapes
 
@@ -99,7 +100,8 @@ python pidnet_demo_dxnn.py assets/videos/pidnet-test.mp4 --model pretrained_dyna
 ```
 
 Same flags as step 3 (`--output`, `--view`, `--alpha`, `--max-display-size`,
-`--window-name`). Video only for now — no single-image input.
+`--window-name`). `masks` is the default output. Video only for now — no
+single-image input.
 
 ## 7. Evaluate DXNN accuracy on Cityscapes
 
@@ -128,3 +130,35 @@ python compare_onnx_dxnn.py \
 Reports per-pixel cosine similarity and argmax agreement between the two `masks`
 outputs (mean/min/`--threshold`-based ratio). Use `--images-dir assets/images` for a
 quick smoke test without the full dataset.
+
+## 9. Check `labels == argmax(masks)` consistency
+
+`compare_onnx_dxnn.py` only checks the `masks` outputs; it does not validate the
+separate in-graph `labels` output. Since Softmax preserves class ordering, outputs
+derived from the same logits must satisfy `labels == argmax(masks)`. Check this
+invariant inside each model and compare ONNX/DXNN class predictions with:
+
+```bash
+python compare_labels_masks.py \
+  --onnx-model pretrained_dynamic.onnx \
+  --dxnn-model pretrained_dynamic_fixed_2.dxnn \
+  --dataset-root cityscapes_small \
+  --limit 100 \
+  --save-json metrics/labels_masks_agreement_100.json
+```
+
+The summary reports four pooled, native-output-resolution agreement ratios:
+
+- `onnx_labels_vs_masks_argmax`: ONNX internal invariant.
+- `dxnn_labels_vs_masks_argmax`: DXNN internal invariant.
+- `onnx_vs_dxnn_labels`: direct comparison of the two `labels` outputs.
+- `onnx_vs_dxnn_masks_argmax`: comparison after host-side ArgMax of each `masks`
+  output.
+
+For `pretrained_dynamic.onnx` and `pretrained_dynamic_fixed_2.dxnn`, the first 100
+`cityscapes_small` images previously produced approximately `1.0000`, `0.6398`,
+`0.6396`, and `0.9758`, respectively. The high `masks` agreement together with low
+DXNN internal `labels` agreement isolates the observed issue to the compiled
+ArgMax/`labels` path rather than the PIDNet backbone as a whole. Results depend on
+the compiler build and model artifact, so rerun this check for every newly compiled
+DXNN model.
